@@ -12,13 +12,5 @@ export interface District {
   y: number;
   height: number;
   roofStyle: "flat" | "pitched";
-}
-
-// НОВОЕ: Ручной блок
-export interface ManualBlock {
-  id: string;
-  x: number;
-  y: number;
-  z: number; // Высота над землей (0 - пол)
-  h: number; // Высота самого блока
+  colorOverride?: Palette; // <--- ОБЯЗАТЕЛЬНО ДОЛЖНО БЫТЬ ЗДЕСЬ
 }

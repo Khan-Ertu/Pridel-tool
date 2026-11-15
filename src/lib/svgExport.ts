@@ -1,10 +1,23 @@
-export function downloadSvg(svgElement: SVGSVGElement | null, filename = "pridel-house.svg") {
+export function downloadSvg(
+  svgElement: SVGSVGElement | null, 
+  filename = "pridel-city.svg",
+  bounds?: { minX: number; minY: number; maxX: number; maxY: number }
+) {
   if (!svgElement) return;
   const clone = svgElement.cloneNode(true) as SVGSVGElement;
   
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   
-  // Удаляем всё, что помечено как UI (сетка пола, рамки и т.д.)
+  // Обрезаем viewBox по границам города + отступ
+  if (bounds && bounds.maxX > bounds.minX) {
+    const padding = 80;
+    const w = (bounds.maxX - bounds.minX) + padding * 2;
+    const h = (bounds.maxY - bounds.minY) + padding * 2;
+    clone.setAttribute("viewBox", `${bounds.minX - padding} ${bounds.minY - padding} ${w} ${h}`);
+    // Делаем фон прозрачным для экспорта
+    clone.style.background = "transparent";
+  }
+  
   clone.querySelectorAll(".ui-no-export").forEach(el => el.remove());
   
   const serializer = new XMLSerializer();
