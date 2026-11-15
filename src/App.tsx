@@ -6,7 +6,6 @@ import { downloadSvg } from "./lib/svgExport";
 import type { Palette, District } from "./types";
 
 const PC: any = (PCModule as any).default ?? PCModule;
-
 type PCRing = [number, number][];
 type PCPoly = PCRing[];
 type PCMulti = PCPoly[];
@@ -66,17 +65,17 @@ function getVisibleEdges(poly: [number, number][], angle: number): number[] {
 }
 
 function getWindowsOnWall(
-  p1: [number, number], p2: [number, number], z1: number, z2: number, angle: number
+  p1: [number, number], p2: [number, number], z1: number, z2: number, angle: number, tilt: number
 ) {
   const dx = p2[0] - p1[0];
   const dy = p2[1] - p1[1];
   const len = Math.hypot(dx, dy);
   const count = Math.max(1, Math.floor(len / 1.5));
   const windows = [];
-  const wallP1 = project(p1[0], p1[1], z1, angle);
-  const wallP2 = project(p2[0], p2[1], z1, angle);
-  const wallP3 = project(p2[0], p2[1], z2, angle);
-  const wallP4 = project(p1[0], p1[1], z2, angle);
+  const wallP1 = project(p1[0], p1[1], z1, angle, tilt);
+  const wallP2 = project(p2[0], p2[1], z1, angle, tilt);
+  const wallP3 = project(p2[0], p2[1], z2, angle, tilt);
+  const wallP4 = project(p1[0], p1[1], z2, angle, tilt);
   for (let i = 0; i < count; i++) {
     const u1 = (i + 0.25) / count;
     const u2 = (i + 0.75) / count;
@@ -93,6 +92,7 @@ function getWindowsOnWall(
 export default function App() {
   const [camera, setCamera] = useState({ x: 0, y: 150, zoom: 1 });
   const [angle, setAngle] = useState(0);
+  const [tilt, setTilt] = useState(1);
   
   const [districts, setDistricts] = useState<District[]>([]);
   const [floorTiles, setFloorTiles] = useState<Set<string>>(() => {
@@ -110,6 +110,9 @@ export default function App() {
   const [roadWidth, setRoadWidth] = useState(1.0);
   const [heightVariation, setHeightVariation] = useState(0.5);
   
+  // НОВОЕ: Глобальная высота для всех домов
+  const [globalHeight, setGlobalHeight] = useState(3);
+
   const [tool, setTool] = useState<"district" | "select" | "area" | "eraser">("district");
   const [areaMode, setAreaMode] = useState<"add" | "subtract">("add");
 
@@ -152,27 +155,19 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [history]);
 
-  // --- Объединение всех тайлов в единый полигон (для клиппинга) ---
   const floorUnion = useMemo(() => {
     if (floorTiles.size === 0) return null;
     if (!PC?.union) return null;
-    
     const tilePolys: PCPoly[] = [];
     floorTiles.forEach(t => {
       const [x, y] = t.split(",").map(Number);
       tilePolys.push([[[x, y], [x + 1, y], [x + 1, y + 1], [x, y + 1], [x, y]]]);
     });
-    
     try {
       let acc: PCMulti = [tilePolys[0]];
-      for (let i = 1; i < tilePolys.length; i++) {
-        acc = PC.union(acc, tilePolys[i]) as PCMulti;
-      }
+      for (let i = 1; i < tilePolys.length; i++) acc = PC.union(acc, tilePolys[i]) as PCMulti;
       return acc;
-    } catch (e) {
-      console.error("floorUnion error:", e);
-      return null;
-    }
+    } catch { return null; }
   }, [floorTiles]);
 
   const gridBounds = useMemo(() => {
@@ -192,19 +187,15 @@ export default function App() {
     try { return Delaunay.from(points).voronoi(gridBounds as [number, number, number, number]); } catch { return null; }
   }, [districts, gridBounds]);
 
-  // --- ЗДАНИЯ: обрезаем ячейки Вороного по полигону пола ---
   const buildings = useMemo(() => {
     if (!voronoi) return [];
     const result: { district: District; polygon: [number, number][]; pieceIdx: number }[] = [];
-    
     for (let i = 0; i < districts.length; i++) {
       const cell = voronoi.cellPolygon(i);
       if (!cell || cell.length < 4) continue;
-      
       const cellRing: PCRing = cell.map(([x, y]) => [x, y] as [number, number]);
-      
-      // Обрезка по полу (если есть)
       let clippedPieces: PCRing[] = [];
+      
       if (floorUnion) {
         try {
           const clipped = PC.intersection([cellRing], floorUnion) as PCMulti;
@@ -213,27 +204,16 @@ export default function App() {
             if (!piece || piece.length === 0) continue;
             const outer = piece[0];
             if (outer.length < 4) continue;
-            // Убираем замыкающую точку
-            const poly: PCRing = outer.slice(0, -1).map(([x, y]) => [x, y] as [number, number]);
-            clippedPieces.push(poly);
+            clippedPieces.push(outer.slice(0, -1).map(([x, y]) => [x, y] as [number, number]));
           }
-        } catch {
-          // Fallback: без обрезки
-          clippedPieces = [cellRing.slice(0, -1)];
-        }
-      } else {
-        clippedPieces = [cellRing.slice(0, -1)];
-      }
+        } catch { clippedPieces = [cellRing.slice(0, -1)]; }
+      } else { clippedPieces = [cellRing.slice(0, -1)]; }
       
-      // Для каждого куска — shrink и добавление
       clippedPieces.forEach((rawPoly, pidx) => {
-        if (rawPoly.length < 3) return;
-        if (polygonArea(rawPoly) < 0.3) return;
-        
+        if (rawPoly.length < 3 || polygonArea(rawPoly) < 0.3) return;
         const ccw = ensureCCW(rawPoly);
         const shrunk = shrinkPolygon(ccw, roadWidth / 2 + 0.15);
         if (polygonArea(shrunk) < 0.15) return;
-        
         result.push({ district: districts[i], polygon: shrunk, pieceIdx: pidx });
       });
     }
@@ -260,19 +240,18 @@ export default function App() {
     const rect = svgRef.current.getBoundingClientRect();
     const svgX = ((e.clientX - rect.left) / rect.width) * 1000 - 500;
     const svgY = ((e.clientY - rect.top) / rect.height) * 1000 - 500;
-    return unproject((svgX - camera.x) / camera.zoom, (svgY - camera.y) / camera.zoom, angle);
+    return unproject((svgX - camera.x) / camera.zoom, (svgY - camera.y) / camera.zoom, angle, tilt);
   };
 
   const handleFloorClick = (e: React.MouseEvent, x: number, y: number) => {
     e.stopPropagation();
     if (tool === "area") return;
-
     pushHistory();
     if (tool === "district") {
       const px = x + 0.5, py = y + 0.5;
       if (districts.some((d) => Math.hypot(d.x - px, d.y - py) < 0.4)) return;
       setDistricts((prev) => [...prev, {
-        id: `d-${Date.now()}-${Math.random().toString(36).slice(2,5)}`, x: px, y: py, height: 2 + Math.random() * 4, roofStyle: "pitched"
+        id: `d-${Date.now()}-${Math.random().toString(36).slice(2,5)}`, x: px, y: py, height: globalHeight, roofStyle: "pitched"
       }]);
     }
   };
@@ -283,25 +262,20 @@ export default function App() {
       setPanStart({ x: e.clientX, y: angle });
       return;
     }
-    
     if (e.button === 0) {
       const gridPt = getGridCoords(e);
-
       if (tool === "area") {
         setDragStart(gridPt); setDragEnd(gridPt);
         return;
       }
-      
       if (id && tool === "district") {
         setDraggingDistrictId(id);
         return;
       }
-
       if (tool === "district" && !id) {
         setIsPainting(true);
         return;
       }
-
       const t = e.target as SVGElement;
       if (t.tagName === "svg" || t.id === "bg-rect") {
         setIsPanning(true);
@@ -315,29 +289,24 @@ export default function App() {
       setAngle(panStart.y + (e.clientX - panStart.x) * 0.5);
       return;
     }
-
     const gridPt = getGridCoords(e);
-
     if (dragStart && tool === "area") {
       setDragEnd(gridPt);
       return;
     }
-
     if (draggingDistrictId) {
       setDistricts(prev => prev.map(d => d.id === draggingDistrictId ? { ...d, x: gridPt.x, y: gridPt.y } : d));
       return;
     }
-
     if (isPainting && tool === "district") {
       const px = gridPt.x, py = gridPt.y;
       if (!districts.some((d) => Math.hypot(d.x - px, d.y - py) < 1.2)) {
         setDistricts((prev) => [...prev, {
-          id: `d-${Date.now()}-${Math.random().toString(36).slice(2,5)}`, x: px, y: py, height: 2 + Math.random() * 4, roofStyle: "pitched"
+          id: `d-${Date.now()}-${Math.random().toString(36).slice(2,5)}`, x: px, y: py, height: globalHeight, roofStyle: "pitched"
         }]);
       }
       return;
     }
-
     if (isPanning) {
       setCamera((prev) => ({ ...prev, x: e.clientX - panStart.x, y: e.clientY - panStart.y }));
     }
@@ -349,7 +318,6 @@ export default function App() {
       const maxX = Math.floor(Math.max(dragStart.x, dragEnd.x));
       const minY = Math.floor(Math.min(dragStart.y, dragEnd.y));
       const maxY = Math.floor(Math.max(dragStart.y, dragEnd.y));
-
       pushHistory();
       const newTiles = new Set(floorTiles);
       for (let x = minX; x <= maxX; x++) {
@@ -395,6 +363,17 @@ export default function App() {
       });
     }
     setDistricts(newDistricts);
+  };
+
+  // НОВОЕ: Функции глобальных настроек
+  const applyGlobalHeight = () => {
+    pushHistory();
+    setDistricts(prev => prev.map(d => ({ ...d, height: globalHeight })));
+  };
+
+  const applyGlobalRoof = (style: "flat" | "pitched") => {
+    pushHistory();
+    setDistricts(prev => prev.map(d => ({ ...d, roofStyle: style })));
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -469,7 +448,16 @@ export default function App() {
   return (
     <div style={{ display: "flex", height: "100vh", background: "#f4f1ea", fontFamily: "sans-serif", overflow: "hidden" }}>
       <aside style={{ width: 340, padding: 20, borderRight: "1px solid #ddd", background: "#fff", overflowY: "auto", zIndex: 10 }}>
-        <h2 style={{ margin: "0 0 16px 0" }}>Придел — v4.2</h2>
+        <h2 style={{ margin: "0 0 16px 0" }}>Придел — v5.1</h2>
+
+        <div style={{ marginBottom: 16, padding: 12, background: "#f0f7ff", borderRadius: 4 }}>
+          <h4 style={{ margin: "0 0 8px 0", fontSize: 12 }}>Камера</h4>
+          <label style={{ display: "block", marginBottom: 8, fontSize: 12 }}>
+            <div>Наклон: {tilt.toFixed(2)}</div>
+            <input type="range" min="0.1" max="2" step="0.05" value={tilt} onChange={(e) => setTilt(Number(e.target.value))} style={{ width: "100%" }} />
+          </label>
+          <button onClick={() => { setTilt(0.1); setAngle(0); }} style={{ width: "100%", padding: 6, background: "#2196f3", color: "#fff", border: "none", cursor: "pointer", fontSize: 12 }}>👁️ Вид сверху</button>
+        </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
           <button onClick={() => setTool("district")} style={{ padding: 8, background: tool === "district" ? "#90caf9" : "#eee", border: "1px solid #ccc", cursor: "pointer" }}>📍 Дома</button>
@@ -488,6 +476,24 @@ export default function App() {
           </div>
         )}
 
+        {/* НОВОЕ: Глобальные настройки */}
+        <div style={{ marginBottom: 16, padding: 12, background: "#fce4ec", borderRadius: 4 }}>
+          <h4 style={{ margin: "0 0 8px 0", fontSize: 12 }}>Глобальные настройки домов</h4>
+          
+          <label style={{ display: "block", marginBottom: 8, fontSize: 12 }}>
+            <div>Высота всех: {globalHeight.toFixed(1)}</div>
+            <div style={{ display: "flex", gap: 4 }}>
+              <input type="range" min="0.5" max="15" step="0.1" value={globalHeight} onChange={(e) => setGlobalHeight(Number(e.target.value))} style={{ flex: 1 }} />
+              <button onClick={applyGlobalHeight} style={{ padding: "2px 8px", background: "#e91e63", color: "#fff", border: "none", cursor: "pointer", fontSize: 11 }}>ОК</button>
+            </div>
+          </label>
+          
+          <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+            <button onClick={() => applyGlobalRoof("flat")} style={{ flex: 1, padding: 6, background: "#eee", border: "1px solid #ccc", fontSize: 11 }}>Все плоские</button>
+            <button onClick={() => applyGlobalRoof("pitched")} style={{ flex: 1, padding: 6, background: "#eee", border: "1px solid #ccc", fontSize: 11 }}>Все скатные</button>
+          </div>
+        </div>
+
         <div style={{ marginBottom: 16, padding: 12, background: "#f0f7ff", borderRadius: 4 }}>
           <h4 style={{ margin: "0 0 8px 0", fontSize: 12 }}>Генерация</h4>
           <label style={{ display: "block", marginBottom: 8, fontSize: 12 }}>
@@ -497,9 +503,6 @@ export default function App() {
           <button onClick={generateRandomCity} style={{ width: "100%", padding: 8, background: "#27ae60", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}>
             🎲 Случайный город
           </button>
-          <p style={{ margin: "4px 0 0 0", fontSize: 11, color: "#666" }}>
-            Дома ставятся только внутри тайлов пола.
-          </p>
         </div>
 
         <div style={{ marginBottom: 16 }}>
@@ -512,7 +515,7 @@ export default function App() {
 
         {selectedDistrict && tool === "select" && (
           <div style={{ marginBottom: 16, padding: 12, background: "#fff9c4", borderRadius: 4 }}>
-            <h4 style={{ margin: "0 0 8px 0", fontSize: 12 }}>Здание</h4>
+            <h4 style={{ margin: "0 0 8px 0", fontSize: 12 }}>Выбранное здание</h4>
             <label style={{ display: "block", fontSize: 12, marginBottom: 8 }}>
               <div>Высота: {selectedDistrict.height.toFixed(1)}</div>
               <input type="range" min="0.5" max="15" step="0.1" value={selectedDistrict.height} onChange={(e) => setDistricts((prev) => prev.map((d) => d.id === selectedDistrict.id ? { ...d, height: Number(e.target.value) } : d))} style={{ width: "100%" }} />
@@ -557,11 +560,10 @@ export default function App() {
           onContextMenu={(e) => e.preventDefault()}
         >
           <defs>
-            {/* CLIP PATH: только внутри нарисованных тайлов */}
             <clipPath id="floor-clip">
               {Array.from(floorTiles).map(t => {
                 const [x, y] = t.split(",").map(Number);
-                const pts = [project(x, y, 0, angle), project(x+1, y, 0, angle), project(x+1, y+1, 0, angle), project(x, y+1, 0, angle)];
+                const pts = [project(x, y, 0, angle, tilt), project(x+1, y, 0, angle, tilt), project(x+1, y+1, 0, angle, tilt), project(x, y+1, 0, angle, tilt)];
                 return <polygon key={`clip-${t}`} points={pts.map(p => `${p.x},${p.y}`).join(" ")} />;
               })}
             </clipPath>
@@ -571,11 +573,10 @@ export default function App() {
 
           <g transform={`translate(${camera.x}, ${camera.y}) scale(${camera.zoom})`}>
             
-            {/* Пол */}
             <g className="ui-no-export">
               {Array.from(floorTiles).map(tileStr => {
                 const [x, y] = tileStr.split(",").map(Number);
-                const pts = [project(x, y, 0, angle), project(x+1, y, 0, angle), project(x+1, y+1, 0, angle), project(x, y+1, 0, angle)];
+                const pts = [project(x, y, 0, angle, tilt), project(x+1, y, 0, angle, tilt), project(x+1, y+1, 0, angle, tilt), project(x, y+1, 0, angle, tilt)];
                 return (
                   <polygon
                     key={`tile-${tileStr}`}
@@ -595,20 +596,19 @@ export default function App() {
                   {x: Math.floor(Math.max(dragStart.x, dragEnd.x)) + 1, y: Math.floor(Math.max(dragStart.y, dragEnd.y)) + 1},
                   {x: Math.floor(Math.min(dragStart.x, dragEnd.x)), y: Math.floor(Math.max(dragStart.y, dragEnd.y)) + 1}
                 ].map(p => {
-                  const proj = project(p.x, p.y, 0, angle); return `${proj.x},${proj.y}`;
+                  const proj = project(p.x, p.y, 0, angle, tilt); return `${proj.x},${proj.y}`;
                 }).join(" ")}
                 fill={areaMode === "add" ? "#81c784" : "#e57373"} fillOpacity={0.4} stroke={areaMode === "add" ? "#2e7d32" : "#c62828"} strokeWidth={2}
                 style={{ pointerEvents: "none" }}
               />
             )}
 
-            {/* ДОРОГИ (клипнуты по полу) */}
             {voronoi && (
               <g clipPath="url(#floor-clip)" style={{ pointerEvents: "none" }}>
                 {districts.map((_, i) => {
                   const cell = voronoi.cellPolygon(i);
                   if (!cell) return null;
-                  const str = cell.map((p: any) => { const pt = project(p[0], p[1], 0, angle); return `${pt.x},${pt.y}`; }).join(" ");
+                  const str = cell.map((p: any) => { const pt = project(p[0], p[1], 0, angle, tilt); return `${pt.x},${pt.y}`; }).join(" ");
                   return (
                     <g key={`road-${i}`}>
                       <polygon points={str} fill="#dcedc8" fillOpacity={0.3} />
@@ -619,15 +619,14 @@ export default function App() {
               </g>
             )}
 
-            {/* ЗДАНИЯ (обрезаны геометрически) */}
             {sortedBuildings.map(({ district, polygon, pieceIdx }) => {
               const visible = getVisibleEdges(polygon, angle);
-              const bottomProj = polygon.map(([x, y]) => project(x, y, 0, angle));
-              const topProj = polygon.map(([x, y]) => project(x, y, district.height, angle));
+              const bottomProj = polygon.map(([x, y]) => project(x, y, 0, angle, tilt));
+              const topProj = polygon.map(([x, y]) => project(x, y, district.height, angle, tilt));
               
               const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
               const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
-              const apexProj = project(cx, cy, district.height + ROOF_HEIGHT, angle);
+              const apexProj = project(cx, cy, district.height + ROOF_HEIGHT, angle, tilt);
               const scx = topProj.reduce((s, p) => s + p.x, 0) / topProj.length;
               const isSelected = selectedId === district.id && tool === "select";
 
@@ -637,7 +636,7 @@ export default function App() {
                     const j = (idx + 1) % polygon.length;
                     const facePts = [bottomProj[idx], bottomProj[j], topProj[j], topProj[idx]];
                     const color = (bottomProj[idx].x + bottomProj[j].x) / 2 > scx ? palette.right : palette.left;
-                    const winPtsList = getWindowsOnWall(polygon[idx], polygon[j], 0, district.height, angle);
+                    const winPtsList = getWindowsOnWall(polygon[idx], polygon[j], 0, district.height, angle, tilt);
 
                     return (
                       <g key={`side-${idx}`}>
@@ -695,7 +694,7 @@ export default function App() {
 
             <g className="ui-no-export">
               {districts.map((d) => {
-                const proj = project(d.x, d.y, 0, angle);
+                const proj = project(d.x, d.y, 0, angle, tilt);
                 return (
                   <g key={`marker-${d.id}`} onPointerDown={(e) => handlePointerDown(e, d.id)} onContextMenu={(e) => handleDeleteDistrict(e, d.id)} style={{ cursor: "grab", pointerEvents: "auto" }}>
                     <circle cx={proj.x} cy={proj.y} r={10} fill="transparent" />
