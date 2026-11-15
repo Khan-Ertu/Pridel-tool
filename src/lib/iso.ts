@@ -55,3 +55,23 @@ export function getDepth(x: number, y: number, z: number, angle: number) {
   const ry = x * Math.sin(rad) + y * Math.cos(rad);
   return rx + ry + z;
 }
+// Обратная проекция: экран -> координаты сетки (для перетаскивания)
+export function unproject(screenX: number, screenY: number, angle: number) {
+  const rad = (angle * Math.PI) / 180;
+  
+  // 1. Убираем изометрический сдвиг (z=0 для пола)
+  const isoX = screenX / (TILE_W / 2);
+  const isoY = screenY / (TILE_H / 2);
+  
+  // 2. Находим координаты до поворота
+  const rx = (isoX + isoY) / 2;
+  const ry = (isoY - isoX) / 2;
+  
+  // 3. Обратный поворот (на -angle)
+  const cos = Math.cos(-rad);
+  const sin = Math.sin(-rad);
+  const x = rx * cos - ry * sin;
+  const y = rx * sin + ry * cos;
+  
+  return { x, y };
+}
