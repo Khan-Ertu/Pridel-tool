@@ -52,6 +52,57 @@ function ensureCCW(poly: [number, number][]): [number, number][] {
   return s > 0 ? poly : [...poly].reverse();
 }
 
+function isPointInPolygon(x: number, y: number, poly: [number, number][]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i];
+    const [xj, yj] = poly[j];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function findInsidePoint(poly: [number, number][]): [number, number] {
+  const vx = poly.reduce((s, p) => s + p[0], 0) / poly.length;
+  const vy = poly.reduce((s, p) => s + p[1], 0) / poly.length;
+  if (isPointInPolygon(vx, vy, poly)) return [vx, vy];
+
+  const minX = Math.min(...poly.map(p => p[0]));
+  const maxX = Math.max(...poly.map(p => p[0]));
+  const minY = Math.min(...poly.map(p => p[1]));
+  const maxY = Math.max(...poly.map(p => p[1]));
+
+  let bestX = vx, bestY = vy, bestD = Infinity;
+  const N = 15;
+  for (let i = 1; i < N; i++) {
+    for (let j = 1; j < N; j++) {
+      const x = minX + (maxX - minX) * i / N;
+      const y = minY + (maxY - minY) * j / N;
+      if (!isPointInPolygon(x, y, poly)) continue;
+      const d = Math.hypot(x - vx, y - vy);
+      if (d < bestD) { bestD = d; bestX = x; bestY = y; }
+    }
+  }
+  return [bestX, bestY];
+}
+
+function isConvex(poly: [number, number][]): boolean {
+  if (poly.length < 4) return true;
+  let sign = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const c = poly[(i + 2) % poly.length];
+    const cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+    if (Math.abs(cross) < 0.0001) continue;
+    if (sign === 0) sign = Math.sign(cross);
+    else if (Math.sign(cross) !== sign) return false;
+  }
+  return true;
+}
+
 function getVisibleEdges(poly: [number, number][], angle: number, tilt: number): number[] {
   if (poly.length < 3) return [];
   if (tilt <= 0.55) return [];
@@ -290,13 +341,16 @@ export default function App() {
       const bottomProj = polygon.map(([x, y]) => project(x, y, 0, angle, tilt));
       const topProj = polygon.map(([x, y]) => project(x, y, district.height, angle, tilt));
 
-      const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
-      const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
-      const apexProj = project(cx, cy, district.height + ROOF_HEIGHT, angle, tilt);
+      // Безопасная точка внутри полигона (центроид может быть снаружи у вогнутых форм)
+      const [apexX, apexY] = findInsidePoint(polygon);
+      const apexProj = project(apexX, apexY, district.height + ROOF_HEIGHT, angle, tilt);
+
       const scx = topProj.reduce((s, p) => s + p.x, 0) / topProj.length;
       const isSelected = selectedId === district.id && tool === "select";
       const p = district.colorOverride || palette;
+      const convex = isConvex(polygon);
 
+      // Стены
       if (!isTopView) {
         visible.forEach(idx => {
           const j = (idx + 1) % polygon.length;
@@ -321,8 +375,12 @@ export default function App() {
         });
       }
 
-      if (district.roofStyle === "flat" || isTopView) {
-        const depth = getDepth(cx, cy, district.height, angle);
+      // Крыша — скатная только для выпуклых форм, в остальных случаях — плоская
+      const usePitched = district.roofStyle === "pitched" && !isTopView && convex;
+
+      if (!usePitched) {
+        // Плоская крыша (вид сверху / вогнутый полигон / ручной выбор)
+        const depth = getDepth(apexX, apexY, district.height, angle);
         objects.push({
           type: 'roof',
           key: `${district.id}-${pieceIdx}-roof`,
@@ -333,12 +391,16 @@ export default function App() {
           depth, districtId: district.id
         });
       } else {
-        visible.forEach(idx => {
+        // Скатная крыша — ВСЕ грани пирамиды, каждая со своей глубиной
+        for (let idx = 0; idx < polygon.length; idx++) {
           const j = (idx + 1) % polygon.length;
           const roofPts = [topProj[idx], topProj[j], apexProj];
-          const midX = (polygon[idx][0] + polygon[j][0] + cx) / 3;
-          const midY = (polygon[idx][1] + polygon[j][1] + cy) / 3;
-          const depth = getDepth(midX, midY, district.height + ROOF_HEIGHT / 3, angle);
+
+          const d1 = getDepth(polygon[idx][0], polygon[idx][1], district.height, angle);
+          const d2 = getDepth(polygon[j][0], polygon[j][1], district.height, angle);
+          const d3 = getDepth(apexX, apexY, district.height + ROOF_HEIGHT, angle);
+          const depth = (d1 + d2 + d3) / 3;
+
           objects.push({
             type: 'roof',
             key: `${district.id}-${pieceIdx}-r-${idx}`,
@@ -348,7 +410,7 @@ export default function App() {
             strokeWidth: isSelected ? 3 : 1.5,
             depth, districtId: district.id
           });
-        });
+        }
       }
     });
 
