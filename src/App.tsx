@@ -52,15 +52,36 @@ function ensureCCW(poly: [number, number][]): [number, number][] {
   return s > 0 ? poly : [...poly].reverse();
 }
 
-function getVisibleEdges(poly: [number, number][], angle: number): number[] {
+function getVisibleEdges(poly: [number, number][], angle: number, tilt: number): number[] {
+  if (poly.length < 3) return [];
+  if (tilt <= 0.55) return [];
+
   const rad = (angle * Math.PI) / 180;
-  const cos = Math.cos(rad); const sin = Math.sin(rad);
-  const rotated = poly.map(([x, y]) => [x * cos - y * sin, x * sin + y * cos]);
+  const cosA = Math.cos(rad);
+  const sinA = Math.sin(rad);
+
+  // Вектор, направленный от сцены к камере (в мировых координатах)
+  // Это направление, в котором экранные объекты «приближаются» (двигаются вниз по экрану)
+  const camDirX = cosA + sinA;
+  const camDirY = cosA - sinA;
+
   const visible: number[] = [];
-  for (let i = 0; i < rotated.length; i++) {
-    const a = rotated[i]; const b = rotated[(i + 1) % rotated.length];
-    if ((b[1] - a[1]) - (b[0] - a[0]) > 0) visible.push(i);
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const ex = b[0] - a[0];
+    const ey = b[1] - a[1];
+
+    // Внешняя нормаль для полигона против часовой стрелки (CCW)
+    // (полигон гарантированно CCW — мы применяем ensureCCW перед рендером)
+    const nx = ey;
+    const ny = -ex;
+
+    // Ребро видимо, если его внешняя нормаль смотрит в сторону камеры
+    const dot = nx * camDirX + ny * camDirY;
+    if (dot > 0.0001) visible.push(i);
   }
+
   return visible;
 }
 
@@ -75,7 +96,7 @@ function getWindowsOnWall(
   const wallP2 = project(p2[0], p2[1], z1, angle, tilt);
   const wallP3 = project(p2[0], p2[1], z2, angle, tilt);
   const wallP4 = project(p1[0], p1[1], z2, angle, tilt);
-  
+
   let doorPts = null;
   if (len > 1.0) {
     const interp = (u: number, v: number) => {
@@ -99,11 +120,34 @@ function getWindowsOnWall(
   return { windows, door: doorPts };
 }
 
+const HexColorInput = ({ label, value, onChange }: { label: string, value: string, onChange: (val: string) => void }) => {
+  const [text, setText] = useState(value);
+  useEffect(() => { setText(value); }, [value]);
+
+  const handleTextChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    let v = e.target.value.trim();
+    v = v.replace(/^#+/, "");
+    if (v.length > 0) v = "#" + v;
+    v = v.toUpperCase();
+    setText(v);
+    if (/^#[0-9A-F]{6}$/.test(v)) onChange(v);
+  };
+
+  return (
+    <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, fontSize: 12 }}>
+      <span>{label}</span>
+      <div style={{ display: "flex", gap: 4 }}>
+        <input type="color" value={value} onChange={(e) => { onChange(e.target.value); setText(e.target.value); }} style={{ width: 24, height: 24, padding: 0, border: "none", cursor: "pointer" }} />
+        <input type="text" value={text} onChange={handleTextChange} placeholder="#000000" style={{ width: 72, fontSize: 11, padding: "2px 4px", fontFamily: "monospace", border: "1px solid #ccc", borderRadius: 2, textTransform: "uppercase" }} />
+      </div>
+    </label>
+  );
+};
+
 export default function App() {
   const [camera, setCamera] = useState({ x: 0, y: 150, zoom: 1 });
   const [angle, setAngle] = useState(0);
   const [tilt, setTilt] = useState(1);
-  
   const [districts, setDistricts] = useState<District[]>([]);
   const [floorTiles, setFloorTiles] = useState<Set<string>>(() => {
     const initial = new Set<string>();
@@ -121,7 +165,15 @@ export default function App() {
   const [heightVariation, setHeightVariation] = useState(0.5);
   const [globalHeight, setGlobalHeight] = useState(3);
 
-  // НОВОЕ: добавлен инструмент "brush"
+  // НОВОЕ: состояния для фоновой картинки
+  const [bgImage, setBgImage] = useState<string | null>(null);
+  const [showBg, setShowBg] = useState(true);
+  const [bgOpacity, setBgOpacity] = useState(0.5);
+  const [bgWidth, setBgWidth] = useState(20);
+  const [bgAspect, setBgAspect] = useState(1);
+  const [bgX, setBgX] = useState(0);
+  const [bgY, setBgY] = useState(0);
+
   const [tool, setTool] = useState<"district" | "brush" | "select" | "area" | "eraser">("district");
   const [areaMode, setAreaMode] = useState<"add" | "subtract">("add");
 
@@ -130,10 +182,13 @@ export default function App() {
   const svgRef = useRef<SVGSVGElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
+  const bgInputRef = useRef<HTMLInputElement>(null); // НОВОЕ
 
   const [isPanning, setIsPanning] = useState(false);
   const [isRotating, setIsRotating] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const rotateStartRef = useRef({ x: 0, y: 0, angle: 0, tilt: 1 });
+  
   const [draggingDistrictId, setDraggingDistrictId] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{x: number, y: number} | null>(null);
   const [dragEnd, setDragEnd] = useState<{x: number, y: number} | null>(null);
@@ -226,14 +281,79 @@ export default function App() {
     return result;
   }, [districts, voronoi, roadWidth, floorUnion]);
 
-  const sortedBuildings = useMemo(() => {
-    return [...buildings].sort((a, b) => {
-      const ca = a.polygon.reduce((acc, p) => [acc[0] + p[0], acc[1] + p[1]], [0, 0]);
-      const cb = b.polygon.reduce((acc, p) => [acc[0] + p[0], acc[1] + p[1]], [0, 0]);
-      return getDepth(ca[0]/a.polygon.length, ca[1]/a.polygon.length, 0, angle) - 
-             getDepth(cb[0]/b.polygon.length, cb[1]/b.polygon.length, 0, angle);
+  const renderObjects = useMemo(() => {
+    const objects: any[] = [];
+    const isTopView = tilt <= 0.55;
+
+    buildings.forEach(({ district, polygon, pieceIdx }) => {
+      const visible = getVisibleEdges(polygon, angle, tilt);
+      const bottomProj = polygon.map(([x, y]) => project(x, y, 0, angle, tilt));
+      const topProj = polygon.map(([x, y]) => project(x, y, district.height, angle, tilt));
+
+      const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
+      const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
+      const apexProj = project(cx, cy, district.height + ROOF_HEIGHT, angle, tilt);
+      const scx = topProj.reduce((s, p) => s + p.x, 0) / topProj.length;
+      const isSelected = selectedId === district.id && tool === "select";
+      const p = district.colorOverride || palette;
+
+      if (!isTopView) {
+        visible.forEach(idx => {
+          const j = (idx + 1) % polygon.length;
+          const facePts = [bottomProj[idx], bottomProj[j], topProj[j], topProj[idx]];
+          const color = (bottomProj[idx].x + bottomProj[j].x) / 2 > scx ? p.right : p.left;
+          const { windows, door } = getWindowsOnWall(polygon[idx], polygon[j], 0, district.height, angle, tilt);
+
+          const midX = (polygon[idx][0] + polygon[j][0]) / 2;
+          const midY = (polygon[idx][1] + polygon[j][1]) / 2;
+          const depth = getDepth(midX, midY, district.height / 2, angle);
+
+          objects.push({
+            type: 'wall',
+            key: `${district.id}-${pieceIdx}-w-${idx}`,
+            points: facePts.map(pt => `${pt.x},${pt.y}`).join(" "),
+            color, outline: p.outline,
+            windows: windows.map(winPts => winPts.map(pt => `${pt.x},${pt.y}`).join(" ")),
+            door: door ? door.map(pt => `${pt.x},${pt.y}`).join(" ") : null,
+            windowColor: p.window,
+            depth, districtId: district.id
+          });
+        });
+      }
+
+      if (district.roofStyle === "flat" || isTopView) {
+        const depth = getDepth(cx, cy, district.height, angle);
+        objects.push({
+          type: 'roof',
+          key: `${district.id}-${pieceIdx}-roof`,
+          points: topProj.map(pt => `${pt.x},${pt.y}`).join(" "),
+          color: isSelected ? "#ffe082" : p.top,
+          outline: p.outline,
+          strokeWidth: isSelected ? 3 : 1.5,
+          depth, districtId: district.id
+        });
+      } else {
+        visible.forEach(idx => {
+          const j = (idx + 1) % polygon.length;
+          const roofPts = [topProj[idx], topProj[j], apexProj];
+          const midX = (polygon[idx][0] + polygon[j][0] + cx) / 3;
+          const midY = (polygon[idx][1] + polygon[j][1] + cy) / 3;
+          const depth = getDepth(midX, midY, district.height + ROOF_HEIGHT / 3, angle);
+          objects.push({
+            type: 'roof',
+            key: `${district.id}-${pieceIdx}-r-${idx}`,
+            points: roofPts.map(pt => `${pt.x},${pt.y}`).join(" "),
+            color: isSelected ? "#ffe082" : p.top,
+            outline: p.outline,
+            strokeWidth: isSelected ? 3 : 1.5,
+            depth, districtId: district.id
+          });
+        });
+      }
     });
-  }, [buildings, angle]);
+
+    return objects.sort((a, b) => a.depth - b.depth);
+  }, [buildings, angle, tilt, palette, selectedId, tool]);
 
   const handleExport = () => {
     if (!svgRef.current) return;
@@ -247,13 +367,24 @@ export default function App() {
       if (p2.x < minX) minX = p2.x; if (p2.x > maxX) maxX = p2.x;
       if (p2.y < minY) minY = p2.y; if (p2.y > maxY) maxY = p2.y;
     });
-    sortedBuildings.forEach(b => {
+    buildings.forEach(b => {
       b.polygon.forEach(([x, y]) => {
         const p = project(x, y, b.district.height + ROOF_HEIGHT, angle, tilt);
         if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
         if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
       });
     });
+    // Учитываем картинку фона
+    if (showBg && bgImage) {
+      const w = bgWidth;
+      const h = bgWidth / bgAspect;
+      const x0 = bgX - w / 2, y0 = bgY - h / 2;
+      [[x0, y0], [x0 + w, y0], [x0, y0 + h], [x0 + w, y0 + h]].forEach(([x, y]) => {
+        const p = project(x, y, 0, angle, tilt);
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+      });
+    }
     if (minX === Infinity) { minX = -100; minY = -100; maxX = 100; maxY = 100; }
     downloadSvg(svgRef.current, "pridel-city.svg", { minX, minY, maxX, maxY });
   };
@@ -272,7 +403,6 @@ export default function App() {
     return unproject((svgX - camera.x) / camera.zoom, (svgY - camera.y) / camera.zoom, angle, tilt);
   };
 
-  // Вспомогательная функция добавления дома
   const addHouseAt = (x: number, y: number) => {
     if (districts.some((d) => Math.hypot(d.x - x, d.y - y) < 1.2)) return;
     setDistricts((prev) => [...prev, {
@@ -281,95 +411,52 @@ export default function App() {
   };
 
   const handlePointerDown = (e: React.PointerEvent, id?: string) => {
-    if (e.button === 2) {
-      setIsRotating(true);
-      setPanStart({ x: e.clientX, y: angle });
+    if (e.button === 1) {
+      e.preventDefault();
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - camera.x, y: e.clientY - camera.y });
       return;
     }
-    
+    if (e.button === 2) {
+      rotateStartRef.current = { x: e.clientX, y: e.clientY, angle, tilt };
+      setIsRotating(true);
+      return;
+    }
     if (e.button === 0) {
       const gridPt = getGridCoords(e);
-      
-      // Поле
-      if (tool === "area") {
-        setDragStart(gridPt); setDragEnd(gridPt);
-        return;
-      }
-      
-      // Одиночный клик (📍 Дома)
-      if (tool === "district" && !id) {
-        pushHistory();
-        addHouseAt(gridPt.x, gridPt.y);
-        return;
-      }
-
-      // Кисть (🖌️)
-      if (tool === "brush" && !id) {
-        pushHistory();
-        setIsPainting(true);
-        addHouseAt(gridPt.x, gridPt.y);
-        return;
-      }
-      
-      // Ластик (🗑️)
-      if (tool === "eraser") {
-        pushHistory();
-        setIsPainting(true);
-        setDistricts(prev => prev.filter(d => Math.hypot(d.x - gridPt.x, d.y - gridPt.y) > 0.8));
-        return;
-      }
-      
-      // Перетаскивание маркера
-      if (id && (tool === "district" || tool === "brush")) {
-        setDraggingDistrictId(id);
-        return;
-      }
-      
-      // Панорамирование
+      if (tool === "area") { setDragStart(gridPt); setDragEnd(gridPt); return; }
+      if (tool === "district" && !id) { pushHistory(); addHouseAt(gridPt.x, gridPt.y); return; }
+      if (tool === "brush" && !id) { pushHistory(); setIsPainting(true); addHouseAt(gridPt.x, gridPt.y); return; }
+      if (tool === "eraser") { pushHistory(); setIsPainting(true); setDistricts(prev => prev.filter(d => Math.hypot(d.x - gridPt.x, d.y - gridPt.y) > 0.8)); return; }
+      if (id && (tool === "district" || tool === "brush")) { setDraggingDistrictId(id); return; }
       const t = e.target as SVGElement;
-      if (t.tagName === "svg" || t.id === "bg-rect") {
-        setIsPanning(true);
-        setPanStart({ x: e.clientX - camera.x, y: e.clientY - camera.y });
-      }
+      if (t.tagName === "svg" || t.id === "bg-rect") { setIsPanning(true); setPanStart({ x: e.clientX - camera.x, y: e.clientY - camera.y }); }
     }
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (isRotating) {
-      setAngle(panStart.y + (e.clientX - panStart.x) * 0.5);
+      const r = rotateStartRef.current;
+      const dx = e.clientX - r.x;
+      const dy = e.clientY - r.y;
+      setAngle(r.angle + dx * 0.5);
+      setTilt(Math.max(0.5, Math.min(5.0, r.tilt + dy * 0.008)));
       return;
     }
-    
     const gridPt = getGridCoords(e);
-    
-    if (dragStart && tool === "area") {
-      setDragEnd(gridPt);
-      return;
-    }
-    
-    // Ластик
-    if (isPainting && tool === "eraser") {
-      setDistricts(prev => prev.filter(d => Math.hypot(d.x - gridPt.x, d.y - gridPt.y) > 0.8));
-      return;
-    }
-
-    // Кисть
-    if (isPainting && tool === "brush") {
-      addHouseAt(gridPt.x, gridPt.y);
-      return;
-    }
-    
-    if (draggingDistrictId) {
-      setDistricts(prev => prev.map(d => d.id === draggingDistrictId ? { ...d, x: gridPt.x, y: gridPt.y } : d));
-      return;
-    }
-    
-    if (isPanning) {
-      setCamera((prev) => ({ ...prev, x: e.clientX - panStart.x, y: e.clientY - panStart.y }));
-    }
+    if (dragStart && tool === "area") { setDragEnd(gridPt); return; }
+    if (isPainting && tool === "eraser") { setDistricts(prev => prev.filter(d => Math.hypot(d.x - gridPt.x, d.y - gridPt.y) > 0.8)); return; }
+    if (isPainting && tool === "brush") { addHouseAt(gridPt.x, gridPt.y); return; }
+    if (draggingDistrictId) { setDistricts(prev => prev.map(d => d.id === draggingDistrictId ? { ...d, x: gridPt.x, y: gridPt.y } : d)); return; }
+    if (isPanning) { setCamera((prev) => ({ ...prev, x: e.clientX - panStart.x, y: e.clientY - panStart.y })); }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (e.button === 1 || e.button === 0) {
+      setIsPanning(false); setDraggingDistrictId(null); setDragStart(null); setDragEnd(null); setIsPainting(false);
+    }
+    if (e.button === 2) setIsRotating(false);
+
     if (dragStart && dragEnd && tool === "area") {
       const minX = Math.floor(Math.min(dragStart.x, dragEnd.x));
       const maxX = Math.floor(Math.max(dragStart.x, dragEnd.x));
@@ -379,15 +466,11 @@ export default function App() {
       const newTiles = new Set(floorTiles);
       for (let x = minX; x <= maxX; x++) {
         for (let y = minY; y <= maxY; y++) {
-          if (areaMode === "add") newTiles.add(`${x},${y}`);
-          else newTiles.delete(`${x},${y}`);
+          if (areaMode === "add") newTiles.add(`${x},${y}`); else newTiles.delete(`${x},${y}`);
         }
       }
       setFloorTiles(newTiles);
     }
-    setIsPanning(false); setIsRotating(false);
-    setDraggingDistrictId(null); setDragStart(null); setDragEnd(null);
-    setIsPainting(false);
   };
 
   const handleDeleteDistrict = (e: React.MouseEvent, id: string) => {
@@ -411,62 +494,56 @@ export default function App() {
       if (newDistricts.length >= targetCount) break;
       const [tx, ty] = t.split(",").map(Number);
       const px = tx + 0.5, py = ty + 0.5;
-      const tooClose = newDistricts.some(d => Math.hypot(d.x - px, d.y - py) < minDist);
-      if (tooClose) continue;
-      newDistricts.push({
-        id: `d-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
-        x: px, y: py,
-        height: 1 + Math.random() * (2 + heightVariation * 8),
-        roofStyle: Math.random() > 0.3 ? "pitched" : "flat"
-      });
+      if (newDistricts.some(d => Math.hypot(d.x - px, d.y - py) < minDist)) continue;
+      newDistricts.push({ id: `d-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, x: px, y: py, height: 1 + Math.random() * (2 + heightVariation * 8), roofStyle: Math.random() > 0.3 ? "pitched" : "flat" });
     }
     setDistricts(newDistricts);
   };
 
-  const applyGlobalHeight = () => {
-    pushHistory();
-    setDistricts(prev => prev.map(d => ({ ...d, height: globalHeight })));
-  };
-
-  const applyGlobalRoof = (style: "flat" | "pitched") => {
-    pushHistory();
-    setDistricts(prev => prev.map(d => ({ ...d, roofStyle: style })));
-  };
+  const applyGlobalHeight = () => { pushHistory(); setDistricts(prev => prev.map(d => ({ ...d, height: globalHeight }))); };
+  const applyGlobalRoof = (style: "flat" | "pitched") => { pushHistory(); setDistricts(prev => prev.map(d => ({ ...d, roofStyle: style }))); };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    pushHistory();
+    const file = e.target.files?.[0]; if (!file) return; pushHistory();
     const reader = new FileReader();
     reader.onload = (ev) => {
       const img = new Image();
       img.onload = () => {
-        const size = 24; 
-        const canvas = document.createElement('canvas');
-        canvas.width = size; canvas.height = size;
-        const ctx = canvas.getContext('2d')!;
-        ctx.drawImage(img, 0, 0, size, size);
+        const size = 24; const canvas = document.createElement('canvas'); canvas.width = size; canvas.height = size;
+        const ctx = canvas.getContext('2d')!; ctx.drawImage(img, 0, 0, size, size);
         const data = ctx.getImageData(0, 0, size, size).data;
         const newDistricts: District[] = [];
         for (let y = 0; y < size; y++) {
           for (let x = 0; x < size; x++) {
             const i = (y * size + x) * 4;
-            const lum = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
-            if (lum < 128) {
-              const px = x - size/2 + 0.5;
-              const py = y - size/2 + 0.5;
-              const tileKey = `${Math.floor(px)},${Math.floor(py)}`;
-              if (!floorTiles.has(tileKey)) continue;
-              newDistricts.push({
-                id: `img-${Date.now()}-${x}-${y}`,
-                x: px, y: py, height: 2 + Math.random() * 4, roofStyle: "pitched"
-              });
+            if ((0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]) < 128) {
+              const px = x - size/2 + 0.5, py = y - size/2 + 0.5;
+              if (!floorTiles.has(`${Math.floor(px)},${Math.floor(py)}`)) continue;
+              newDistricts.push({ id: `img-${Date.now()}-${x}-${y}`, x: px, y: py, height: 2 + Math.random() * 4, roofStyle: "pitched" });
             }
           }
         }
         setDistricts(newDistricts);
       };
       img.src = ev.target?.result as string;
+    };
+    reader.readAsDataURL(file); e.target.value = "";
+  };
+
+  // НОВОЕ: загрузка фоновой картинки
+  const handleBgUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const dataUrl = ev.target?.result as string;
+      const img = new Image();
+      img.onload = () => {
+        setBgImage(dataUrl);
+        setBgAspect(img.width / img.height);
+        setShowBg(true);
+      };
+      img.src = dataUrl;
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -476,19 +553,15 @@ export default function App() {
     const data = { districts, palette, roadWidth, heightVariation, tiles: Array.from(floorTiles) };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url; link.download = "pridel-city.json"; link.click();
-    URL.revokeObjectURL(url);
+    const link = document.createElement("a"); link.href = url; link.download = "pridel-city.json"; link.click(); URL.revokeObjectURL(url);
   };
 
   const loadProject = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const file = e.target.files?.[0]; if (!file) return;
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const data = JSON.parse(event.target?.result as string);
-        pushHistory();
+        const data = JSON.parse(event.target?.result as string); pushHistory();
         if (data.districts) setDistricts(data.districts);
         if (data.palette) setPalette(data.palette);
         if (data.roadWidth) setRoadWidth(data.roadWidth);
@@ -496,8 +569,7 @@ export default function App() {
         if (data.tiles) setFloorTiles(new Set(data.tiles));
       } catch { alert("Ошибка формата"); }
     };
-    reader.readAsText(file);
-    e.target.value = "";
+    reader.readAsText(file); e.target.value = "";
   };
 
   const selectedDistrict = districts.find((d) => d.id === selectedId);
@@ -505,18 +577,63 @@ export default function App() {
   return (
     <div style={{ display: "flex", height: "100vh", background: "#f4f1ea", fontFamily: "sans-serif", overflow: "hidden" }}>
       <aside style={{ width: 340, padding: 20, borderRight: "1px solid #ddd", background: "#fff", overflowY: "auto", zIndex: 10 }}>
-        <h2 style={{ margin: "0 0 16px 0" }}>Придел — v5.3</h2>
+        <h2 style={{ margin: "0 0 16px 0" }}>Придел — v6.5</h2>
 
         <div style={{ marginBottom: 16, padding: 12, background: "#f0f7ff", borderRadius: 4 }}>
           <h4 style={{ margin: "0 0 8px 0", fontSize: 12 }}>Камера</h4>
           <label style={{ display: "block", marginBottom: 8, fontSize: 12 }}>
             <div>Наклон: {tilt.toFixed(2)}</div>
- <input type="range" min="0.5" max="5.0" step="0.1" value={tilt} onChange={(e) => setTilt(Number(e.target.value))} style={{ width: "100%" }} />
+            <input type="range" min="0.5" max="5.0" step="0.1" value={tilt} onChange={(e) => setTilt(Number(e.target.value))} style={{ width: "100%" }} />
           </label>
-          <button onClick={() => { setTilt(0.1); setAngle(0); }} style={{ width: "100%", padding: 6, background: "#2196f3", color: "#fff", border: "none", cursor: "pointer", fontSize: 12 }}>👁️ Вид сверху</button>
+          <button onClick={() => { setTilt(0.5); setAngle(45); }} style={{ width: "100%", padding: 6, background: "#2196f3", color: "#fff", border: "none", cursor: "pointer", fontSize: 12 }}>
+            👁️ Вид строго сверху (90°)
+          </button>
+          <p style={{ margin: "4px 0 0 0", fontSize: 10, color: "#666" }}>Зажми ПКМ и веди мышью, чтобы вращать камеру.</p>
         </div>
 
-        {/* НОВЫЙ ИНСТРУМЕНТ: КИСТЬ */}
+        {/* НОВОЕ: Блок "Фон / Подложка" */}
+        <div style={{ marginBottom: 16, padding: 12, background: "#f3e5f5", borderRadius: 4 }}>
+          <h4 style={{ margin: "0 0 8px 0", fontSize: 12 }}>Фон / Подложка</h4>
+          <input type="file" accept="image/*" ref={bgInputRef} onChange={handleBgUpload} style={{ display: "none" }} />
+          
+          <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+            <button onClick={() => bgInputRef.current?.click()} style={{ flex: 1, padding: 6, background: "#e1bee7", border: "1px solid #ce93d8", cursor: "pointer", fontSize: 11 }}>
+              🖼️ {bgImage ? "Заменить" : "Загрузить"}
+            </button>
+            {bgImage && (
+              <>
+                <button onClick={() => setShowBg(!showBg)} style={{ flex: 1, padding: 6, background: showBg ? "#ce93d8" : "#eee", border: "1px solid #ccc", cursor: "pointer", fontSize: 11 }}>
+                  {showBg ? "👁️ Скрыть" : "👁️ Показать"}
+                </button>
+                <button onClick={() => setBgImage(null)} style={{ padding: "6px 8px", background: "#ffcdd2", border: "1px solid #ef9a9a", cursor: "pointer", fontSize: 11, fontWeight: "bold" }} title="Удалить">
+                  ×
+                </button>
+              </>
+            )}
+          </div>
+
+          {bgImage && (
+            <>
+              <label style={{ display: "block", marginBottom: 6, fontSize: 11 }}>
+                <div>Прозрачность: {(bgOpacity * 100).toFixed(0)}%</div>
+                <input type="range" min="0.1" max="1" step="0.05" value={bgOpacity} onChange={(e) => setBgOpacity(Number(e.target.value))} style={{ width: "100%" }} />
+              </label>
+              <label style={{ display: "block", marginBottom: 6, fontSize: 11 }}>
+                <div>Размер: {bgWidth.toFixed(1)}</div>
+                <input type="range" min="5" max="60" step="1" value={bgWidth} onChange={(e) => setBgWidth(Number(e.target.value))} style={{ width: "100%" }} />
+              </label>
+              <label style={{ display: "block", marginBottom: 6, fontSize: 11 }}>
+                <div>Сдвиг X: {bgX.toFixed(1)}</div>
+                <input type="range" min="-30" max="30" step="0.5" value={bgX} onChange={(e) => setBgX(Number(e.target.value))} style={{ width: "100%" }} />
+              </label>
+              <label style={{ display: "block", marginBottom: 0, fontSize: 11 }}>
+                <div>Сдвиг Y: {bgY.toFixed(1)}</div>
+                <input type="range" min="-30" max="30" step="0.5" value={bgY} onChange={(e) => setBgY(Number(e.target.value))} style={{ width: "100%" }} />
+              </label>
+            </>
+          )}
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
           <button onClick={() => setTool("district")} style={{ padding: 8, background: tool === "district" ? "#90caf9" : "#eee", border: "1px solid #ccc", cursor: "pointer" }}>📍 Дома</button>
           <button onClick={() => setTool("brush")} style={{ padding: 8, background: tool === "brush" ? "#90caf9" : "#eee", border: "1px solid #ccc", cursor: "pointer" }}>🖌️ Кисть</button>
@@ -546,24 +663,16 @@ export default function App() {
                <button onClick={() => setDistricts(prev => prev.map(d => d.id === selectedDistrict.id ? {...d, roofStyle: "flat"} : d))} style={{ flex: 1, padding: 6, background: selectedDistrict.roofStyle === "flat" ? "#f4d03f" : "#eee", border: "1px solid #ccc", fontSize: 11 }}>Плоская</button>
                <button onClick={() => setDistricts(prev => prev.map(d => d.id === selectedDistrict.id ? {...d, roofStyle: "pitched"} : d))} style={{ flex: 1, padding: 6, background: selectedDistrict.roofStyle === "pitched" ? "#f4d03f" : "#eee", border: "1px solid #ccc", fontSize: 11 }}>Скатная</button>
             </div>
+            
             <div style={{ fontSize: 11, fontWeight: "bold", marginBottom: 4 }}>Цвета дома:</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 8 }}>
-              {(["top", "left", "right", "window"] as const).map(k => {
-                const current = selectedDistrict.colorOverride?.[k] || palette[k];
-                return (
-                  <label key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, alignItems: "center" }}>
-                    <span>{k === "top" ? "Крыша" : k === "left" ? "Свет" : k === "right" ? "Тень" : "Окна"}</span>
-                    <input type="color" value={current} onChange={(e) => {
-                      const newColors = { ...(selectedDistrict.colorOverride || palette), [k]: e.target.value };
-                      setDistricts(prev => prev.map(d => d.id === selectedDistrict.id ? {...d, colorOverride: newColors} : d));
-                    }} style={{ width: 24, height: 16, padding: 0 }} />
-                  </label>
-                );
-              })}
-            </div>
+            <HexColorInput label="Крыша" value={selectedDistrict.colorOverride?.top || palette.top} onChange={(v) => setDistricts(prev => prev.map(d => d.id === selectedDistrict.id ? {...d, colorOverride: { ...(d.colorOverride || palette), top: v }} : d))} />
+            <HexColorInput label="Свет" value={selectedDistrict.colorOverride?.left || palette.left} onChange={(v) => setDistricts(prev => prev.map(d => d.id === selectedDistrict.id ? {...d, colorOverride: { ...(d.colorOverride || palette), left: v }} : d))} />
+            <HexColorInput label="Тень" value={selectedDistrict.colorOverride?.right || palette.right} onChange={(v) => setDistricts(prev => prev.map(d => d.id === selectedDistrict.id ? {...d, colorOverride: { ...(d.colorOverride || palette), right: v }} : d))} />
+            <HexColorInput label="Окна" value={selectedDistrict.colorOverride?.window || palette.window} onChange={(v) => setDistricts(prev => prev.map(d => d.id === selectedDistrict.id ? {...d, colorOverride: { ...(d.colorOverride || palette), window: v }} : d))} />
+
             <button onClick={() => {
               setDistricts(prev => prev.map(d => d.id === selectedDistrict.id ? {...d, colorOverride: undefined} : d));
-            }} style={{ width: "100%", padding: 4, background: "#eee", border: "1px solid #ccc", fontSize: 10, cursor: "pointer" }}>Сбросить цвета</button>
+            }} style={{ width: "100%", padding: 4, marginTop: 8, background: "#eee", border: "1px solid #ccc", fontSize: 10, cursor: "pointer" }}>Сбросить цвета</button>
           </div>
         )}
 
@@ -603,16 +712,14 @@ export default function App() {
 
         <div style={{ marginBottom: 16 }}>
           <h4 style={{ margin: "0 0 8px 0", fontSize: 12, color: "#888" }}>Базовая палитра</h4>
-          {(["top", "left", "right", "window"] as const).map((key) => (
-            <label key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, fontSize: 12 }}>
-              <span>{key === "top" ? "Крыша" : key === "left" ? "Свет" : key === "right" ? "Тень" : "Окна"}</span>
-              <input type="color" value={palette[key]} onChange={(e) => setPalette({ ...palette, [key]: e.target.value })} style={{ width: 30, height: 20, padding: 0, border: "none", cursor: "pointer" }} />
-            </label>
-          ))}
+          <HexColorInput label="Крыша" value={palette.top} onChange={(v) => setPalette({...palette, top: v})} />
+          <HexColorInput label="Свет" value={palette.left} onChange={(v) => setPalette({...palette, left: v})} />
+          <HexColorInput label="Тень" value={palette.right} onChange={(v) => setPalette({...palette, right: v})} />
+          <HexColorInput label="Окна" value={palette.window} onChange={(v) => setPalette({...palette, window: v})} />
         </div>
 
         <div style={{ display: "grid", gap: 6 }}>
-          <button onClick={() => imgInputRef.current?.click()} style={{ padding: 8, background: "#e1bee7", border: "1px solid #ce93d8", cursor: "pointer" }}>🖼️ Импорт из фото</button>
+          <button onClick={() => imgInputRef.current?.click()} style={{ padding: 8, background: "#e1bee7", border: "1px solid #ce93d8", cursor: "pointer" }}>🖼️ Импорт из фото (силуэт)</button>
           <input type="file" accept="image/*" ref={imgInputRef} onChange={handleImageUpload} style={{ display: "none" }} />
           <button onClick={saveProject} style={{ padding: 8, background: "#e8f5e9", border: "1px solid #a5d6a7", cursor: "pointer" }}>💾 Сохранить (JSON)</button>
           <button onClick={() => fileInputRef.current?.click()} style={{ padding: 8, background: "#fff3e0", border: "1px solid #ffcc80", cursor: "pointer" }}>📂 Загрузить (JSON)</button>
@@ -622,7 +729,10 @@ export default function App() {
         </div>
       </aside>
 
-      <main style={{ flex: 1, position: "relative", cursor: isPanning || draggingDistrictId ? "grabbing" : isRotating ? "ew-resize" : (tool === "area" || tool === "district" || tool === "brush" || tool === "eraser") ? "crosshair" : "default" }} onWheel={handleWheel}>
+      <main 
+        style={{ flex: 1, position: "relative", cursor: isPanning ? "grabbing" : isRotating ? "move" : (tool === "area" || tool === "district" || tool === "brush" || tool === "eraser") ? "crosshair" : "default" }} 
+        onWheel={handleWheel}
+      >
         <svg
           ref={svgRef}
           viewBox="-500 -500 1000 1000"
@@ -652,11 +762,7 @@ export default function App() {
                 const [x, y] = tileStr.split(",").map(Number);
                 const pts = [project(x, y, 0, angle, tilt), project(x+1, y, 0, angle, tilt), project(x+1, y+1, 0, angle, tilt), project(x, y+1, 0, angle, tilt)];
                 return (
-                  <polygon
-                    key={`tile-${tileStr}`}
-                    points={pts.map(p => `${p.x},${p.y}`).join(" ")}
-                    fill="#e0e0e0" stroke="#ccc" strokeWidth={1}
-                  />
+                  <polygon key={`tile-${tileStr}`} points={pts.map(p => `${p.x},${p.y}`).join(" ")} fill="#e0e0e0" stroke="#ccc" strokeWidth={1} />
                 );
               })}
             </g>
@@ -676,8 +782,8 @@ export default function App() {
               />
             )}
 
-            {voronoi && (
-              <g clipPath="url(#floor-clip)" style={{ pointerEvents: "none" }}>
+{voronoi && (
+  <g className="ui-no-export" clipPath="url(#floor-clip)" style={{ pointerEvents: "none" }}>
                 {districts.map((_, i) => {
                   const cell = voronoi.cellPolygon(i);
                   if (!cell) return null;
@@ -692,81 +798,72 @@ export default function App() {
               </g>
             )}
 
-            {sortedBuildings.map(({ district, polygon, pieceIdx }) => {
-              const visible = getVisibleEdges(polygon, angle);
-              const bottomProj = polygon.map(([x, y]) => project(x, y, 0, angle, tilt));
-              const topProj = polygon.map(([x, y]) => project(x, y, district.height, angle, tilt));
-              
-              const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
-              const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
-              const apexProj = project(cx, cy, district.height + ROOF_HEIGHT, angle, tilt);
-              const scx = topProj.reduce((s, p) => s + p.x, 0) / topProj.length;
-              const isSelected = selectedId === district.id && tool === "select";
-              
-              const p = district.colorOverride || palette;
-
+            {/* НОВОЕ: картинка фона на полу */}
+            {showBg && bgImage && (() => {
+              const w = bgWidth;
+              const h = bgWidth / bgAspect;
+              const x0 = bgX - w / 2;
+              const y0 = bgY - h / 2;
+              const p0 = project(x0, y0, 0, angle, tilt);
+              const p1 = project(x0 + w, y0, 0, angle, tilt);
+              const p3 = project(x0, y0 + h, 0, angle, tilt);
+              const a = (p1.x - p0.x) / w;
+              const b = (p1.y - p0.y) / w;
+              const c = (p3.x - p0.x) / h;
+              const d = (p3.y - p0.y) / h;
               return (
-                <g key={`${district.id}-${pieceIdx}`}>
-                  {visible.map((idx) => {
-                    const j = (idx + 1) % polygon.length;
-                    const facePts = [bottomProj[idx], bottomProj[j], topProj[j], topProj[idx]];
-                    const color = (bottomProj[idx].x + bottomProj[j].x) / 2 > scx ? p.right : p.left;
-                    const { windows, door } = getWindowsOnWall(polygon[idx], polygon[j], 0, district.height, angle, tilt);
+<image
+  className="ui-no-export"
+  href={bgImage}
+  x="0" y="0" width={w} height={h}
+  transform={`matrix(${a} ${b} ${c} ${d} ${p0.x} ${p0.y})`}
+  opacity={bgOpacity}
+  style={{ pointerEvents: "none" }}
+/>
+              );
+            })()}
 
-                    return (
-                      <g key={`side-${idx}`}>
-                        <polygon 
-                          points={facePts.map((pt) => `${pt.x},${pt.y}`).join(" ")} 
-                          fill={color} stroke={p.outline} strokeWidth={1.5} strokeLinejoin="round" 
-                          style={{ pointerEvents: tool === "district" || tool === "brush" ? "none" : "auto", cursor: tool === "eraser" ? "crosshair" : "default" }}
-                          onClick={(e) => { 
-                            e.stopPropagation(); 
-                            if (tool === "eraser") handleDeleteDistrict(e, district.id);
-                            if (tool === "select") setSelectedId(district.id);
-                          }}
-                        />
-                        {windows.map((winPts, wi) => (
-                          <polygon key={`win-${wi}`} points={winPts.map((pt) => `${pt.x},${pt.y}`).join(" ")} fill={p.window} stroke={p.outline} strokeWidth={1} style={{ pointerEvents: "none" }} />
-                        ))}
-                        {door && (
-                          <polygon points={door.map((pt) => `${pt.x},${pt.y}`).join(" ")} fill={p.outline} style={{ pointerEvents: "none" }} />
-                        )}
-                      </g>
-                    );
-                  })}
-
-                  {district.roofStyle === "flat" ? (
+            {renderObjects.map(obj => {
+              if (obj.type === 'wall') {
+                return (
+                  <g key={obj.key}>
                     <polygon
-                      points={topProj.map((pt) => `${pt.x},${pt.y}`).join(" ")}
-                      fill={isSelected ? "#ffe082" : p.top}
-                      stroke={p.outline} strokeWidth={isSelected ? 3 : 1.5} strokeLinejoin="round"
-                      style={{ cursor: "pointer", pointerEvents: tool === "district" || tool === "brush" ? "none" : "auto" }}
-                      onClick={(e) => { 
-                        e.stopPropagation(); 
-                        if (tool === "eraser") handleDeleteDistrict(e, district.id);
-                        if (tool === "select") setSelectedId(district.id);
+                      points={obj.points}
+                      fill={obj.color}
+                      stroke={obj.outline}
+                      strokeWidth={1.5}
+                      strokeLinejoin="round"
+                      style={{ pointerEvents: tool === "district" || tool === "brush" ? "none" : "auto", cursor: tool === "eraser" ? "crosshair" : "default" }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (tool === "eraser") handleDeleteDistrict(e, obj.districtId);
+                        if (tool === "select") setSelectedId(obj.districtId);
                       }}
                     />
-                  ) : (
-                    visible.map((idx) => {
-                      const j = (idx + 1) % polygon.length;
-                      return (
-                        <polygon
-                          key={`roof-${idx}`}
-                          points={[topProj[idx], topProj[j], apexProj].map((pt) => `${pt.x},${pt.y}`).join(" ")}
-                          fill={isSelected ? "#ffe082" : p.top}
-                          stroke={p.outline} strokeWidth={isSelected ? 3 : 1.5} strokeLinejoin="round"
-                          style={{ cursor: "pointer", pointerEvents: tool === "district" || tool === "brush" ? "none" : "auto" }}
-                          onClick={(e) => { 
-                            e.stopPropagation(); 
-                            if (tool === "eraser") handleDeleteDistrict(e, district.id);
-                            if (tool === "select") setSelectedId(district.id);
-                          }}
-                        />
-                      );
-                    })
-                  )}
-                </g>
+                    {obj.windows.map((winStr: string, wi: number) => (
+                      <polygon key={wi} points={winStr} fill={obj.windowColor} stroke={obj.outline} strokeWidth={1} style={{ pointerEvents: "none" }} />
+                    ))}
+                    {obj.door && (
+                      <polygon points={obj.door} fill={obj.outline} style={{ pointerEvents: "none" }} />
+                    )}
+                  </g>
+                );
+              }
+              return (
+                <polygon
+                  key={obj.key}
+                  points={obj.points}
+                  fill={obj.color}
+                  stroke={obj.outline}
+                  strokeWidth={obj.strokeWidth}
+                  strokeLinejoin="round"
+                  style={{ cursor: "pointer", pointerEvents: tool === "district" || tool === "brush" ? "none" : "auto" }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (tool === "eraser") handleDeleteDistrict(e, obj.districtId);
+                    if (tool === "select") setSelectedId(obj.districtId);
+                  }}
+                />
               );
             })}
 
@@ -774,15 +871,15 @@ export default function App() {
               {districts.map((d) => {
                 const proj = project(d.x, d.y, 0, angle, tilt);
                 return (
-                  <g 
-                    key={`marker-${d.id}`} 
-                    onPointerDown={(e) => { 
-                      if (tool === "district" || tool === "brush") { 
-                        e.stopPropagation(); 
-                        handlePointerDown(e, d.id); 
-                      } 
-                    }} 
-                    onContextMenu={(e) => handleDeleteDistrict(e, d.id)} 
+                  <g
+                    key={`marker-${d.id}`}
+                    onPointerDown={(e) => {
+                      if (tool === "district" || tool === "brush") {
+                        e.stopPropagation();
+                        handlePointerDown(e, d.id);
+                      }
+                    }}
+                    onContextMenu={(e) => handleDeleteDistrict(e, d.id)}
                     style={{ cursor: "grab", pointerEvents: "auto" }}
                   >
                     <circle cx={proj.x} cy={proj.y} r={10} fill="transparent" />
