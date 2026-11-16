@@ -395,13 +395,29 @@ export default function App() {
     setCamera((prev) => ({ ...prev, zoom: Math.max(0.2, Math.min(newZoom, 4)) }));
   };
 
-  const getGridCoords = (e: React.PointerEvent | React.MouseEvent) => {
-    if (!svgRef.current) return { x: 0, y: 0 };
-    const rect = svgRef.current.getBoundingClientRect();
-    const svgX = ((e.clientX - rect.left) / rect.width) * 1000 - 500;
-    const svgY = ((e.clientY - rect.top) / rect.height) * 1000 - 500;
-    return unproject((svgX - camera.x) / camera.zoom, (svgY - camera.y) / camera.zoom, angle, tilt);
-  };
+const getGridCoords = (e: React.PointerEvent | React.MouseEvent) => {
+  const svg = svgRef.current;
+  if (!svg) return { x: 0, y: 0 };
+
+  // Нативная трансформация SVG автоматически учитывает:
+  // - viewBox и его масштабирование
+  // - preserveAspectRatio (центрирование + letterboxing)
+  // - любые CSS-трансформации на <svg>
+  const pt = svg.createSVGPoint();
+  pt.x = e.clientX;
+  pt.y = e.clientY;
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return { x: 0, y: 0 };
+  const svgPt = pt.matrixTransform(ctm.inverse());
+
+  // svgPt теперь в координатах viewBox (-500…500), а не в пикселях экрана.
+  // Далее отменяем transform самого <g> (translate + scale)
+  const worldX = (svgPt.x - camera.x) / camera.zoom;
+  const worldY = (svgPt.y - camera.y) / camera.zoom;
+
+  // И переводим из изометрии в координаты сетки
+  return unproject(worldX, worldY, angle, tilt);
+};
 
   const addHouseAt = (x: number, y: number) => {
     if (districts.some((d) => Math.hypot(d.x - x, d.y - y) < 1.2)) return;
