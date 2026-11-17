@@ -1,3 +1,4 @@
+import { LayoutEditor } from "./components/LayoutEditor";
 import { CityArtwork } from "./components/CityArtwork";
 import { useState, useRef, useMemo, useEffect, useCallback } from "react";
 import { project, unproject } from "./lib/iso";
@@ -40,6 +41,7 @@ const HexColorInput = ({ label, value, onChange }: { label: string, value: strin
 };
 
 export default function App() {
+  const [view, setView] = useState<"city" | "layout">("city");
   const [camera, setCamera] = useState({ x: 0, y: 150, zoom: 1 });
   const [angle, setAngle] = useState(0);
   const [tilt, setTilt] = useState(1);
@@ -98,7 +100,7 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+      if (view === "city" && (e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
         if (history.length > 0) {
           const prev = history[history.length - 1];
@@ -109,7 +111,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [history]);
+  }, [history, view]);
 
   const floorUnion = useMemo(() => buildFloorUnion(floorTiles), [floorTiles]);
   const gridBounds = useMemo(() => getGridBounds(floorTiles), [floorTiles]);
@@ -122,6 +124,11 @@ export default function App() {
   const renderObjects = useMemo(
     () => projectCity(buildings, angle, tilt, palette, highlightedId),
     [buildings, angle, tilt, palette, highlightedId]
+  );
+
+  const layoutArtwork = useMemo(
+    () => view === "layout" ? projectCity(buildings, angle, tilt, palette) : [],
+    [view, buildings, angle, tilt, palette]
   );
 
   const handleExport = () => {
@@ -360,9 +367,14 @@ const getGridCoords = (e: React.PointerEvent | React.MouseEvent) => {
   const selectedDistrict = districts.find((d) => d.id === selectedId);
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#f4f1ea", fontFamily: "sans-serif", overflow: "hidden" }}>
+    <>
+    <div hidden={view !== "layout"} style={{ height: "100%" }}>
+      <LayoutEditor artwork={layoutArtwork} onEditCity={() => setView("city")} />
+    </div>
+    <div style={{ display: view === "city" ? "flex" : "none", height: "100vh", background: "#f4f1ea", fontFamily: "sans-serif", overflow: "hidden" }}>
       <aside style={{ width: 340, padding: 20, borderRight: "1px solid #ddd", background: "#fff", overflowY: "auto", zIndex: 10 }}>
         <h2 style={{ margin: "0 0 16px 0" }}>Придел — v6.5</h2>
+        <button type="button" style={{ marginBottom: 16 }} onClick={() => setView("layout")}>Создать макет →</button>
 
         <div style={{ marginBottom: 16, padding: 12, background: "#f0f7ff", borderRadius: 4 }}>
           <h4 style={{ margin: "0 0 8px 0", fontSize: 12 }}>Камера</h4>
@@ -642,5 +654,6 @@ const getGridCoords = (e: React.PointerEvent | React.MouseEvent) => {
         </svg>
       </main>
     </div>
+    </>
   );
 }
